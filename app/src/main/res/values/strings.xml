@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">AudioDetector</string>
+    <string name="button">Button</string>
+    <string name="decode">Decode</string>
+</resources>
