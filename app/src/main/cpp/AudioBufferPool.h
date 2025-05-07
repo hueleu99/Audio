@@ -12,6 +12,7 @@
 #include <vector>
 #include <queue>
 #include <mutex>
+#include "Audio2Storage.h"
 
 class AudioBufferPool {
 public:
@@ -21,9 +22,13 @@ public:
 
     void flush();
 
+
+    void setAudio2Storage(Audio2Storage* ptr) { audio2 = ptr; }
+
 private:
     int sampleRate, channels;
     size_t samplesPer2Sec;
+    Audio2Storage* audio2{};
 
     std::vector<std::shared_ptr<PCMBuffer>> bufferBlocks;
     std::vector<int16_t> currentBuffer;

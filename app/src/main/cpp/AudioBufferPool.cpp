@@ -11,7 +11,8 @@ AudioBufferPool::AudioBufferPool(int sampleRate, int channels)
         : sampleRate(sampleRate), channels(channels),
           samplesPer2Sec(sampleRate * channels * 2),
           threadPool(2) // số worker tùy chọn
-{}
+{
+}
 
 void AudioBufferPool::push(const int16_t* data, int samples, int64_t ptsUs) {
     currentBuffer.insert(currentBuffer.end(), data, data + samples);
@@ -70,9 +71,11 @@ void AudioBufferPool::flush() {
 }
 
 void AudioBufferPool::classifyIfReady() {
-    if (bufferBlocks.size() >= 4) {
-        std::vector<std::shared_ptr<PCMBuffer>> toClassify(bufferBlocks.begin(), bufferBlocks.begin() + 4);
-        bufferBlocks.erase(bufferBlocks.begin(), bufferBlocks.begin() + 4);
+    std::lock_guard<std::mutex> lock(poolMutex);
+    LOGI("classifyIfReady %d", bufferBlocks.size());
+    if (!bufferBlocks.empty()) {
+        std::vector<std::shared_ptr<PCMBuffer>> toClassify(bufferBlocks.begin(), bufferBlocks.begin() + 1);
+        bufferBlocks.erase(bufferBlocks.begin(), bufferBlocks.begin() + 1);
 
         threadPool.enqueue([this, toClassify]() {
             doClassification(toClassify);

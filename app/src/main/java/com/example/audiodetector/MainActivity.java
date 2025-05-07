@@ -1,6 +1,5 @@
 package com.example.audiodetector;
 
-import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 
 import android.content.Intent;
@@ -11,45 +10,24 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
-import android.widget.TextView;
 
 import com.example.audiodetector.databinding.ActivityMainBinding;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 
 public class MainActivity extends AppCompatActivity {
 
-    // Used to load the 'audiodetector' library on application startup.
-    static {
-        System.loadLibrary("audiodetector");
-    }
-
-    public native void nativeInit(int sampleRate, int channels);
-    public native void nativePush(short[] pcm, int length, long ptsUs);
-    public native void nativeFlush();
-
-    public void onPcmDataFromDecoder(ByteBuffer buffer, MediaCodec.BufferInfo info) {
-        short[] pcm = new short[info.size / 2];
-        buffer.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(pcm);
-        nativePush(pcm, pcm.length, info.presentationTimeUs);
-    }
-
-    public void init(int sampleRate, int channels) {
-        nativeInit(sampleRate, channels);
-    }
-
-    public void flush(){
-        nativeFlush();
-    }
-
     private ActivityMainBinding binding;
     private static final int REQUEST_CODE_PICK_VIDEO = 1;
+    private static final int REQUEST_CODE_PICK_AUDIO = 2;
     private static final String TAG = "hue.leu";
-    private Uri inputUri;
-
+    private Uri inputBGUri;
+    private Uri inputFGUri;
+    MediaFormat mediaFormatFG;
+    MediaFormat mediaFormatBG;
+    int trackIndex;
+    AudioDetector audioDetector;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -58,11 +36,20 @@ public class MainActivity extends AppCompatActivity {
         binding = ActivityMainBinding.inflate(getLayoutInflater());
         setContentView(binding.getRoot());
 
+        audioDetector = new AudioDetector();
+
         binding.button.setOnClickListener(v -> {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             intent.setType("video/*");
             intent.addCategory(Intent.CATEGORY_OPENABLE);
             startActivityForResult(intent, REQUEST_CODE_PICK_VIDEO);
+        });
+
+        binding.bg.setOnClickListener(v -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.setType("audio/*");
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            startActivityForResult(intent, REQUEST_CODE_PICK_AUDIO);
         });
         
         binding.decode.setOnClickListener(v -> {
@@ -72,87 +59,52 @@ public class MainActivity extends AppCompatActivity {
 
     private void startDecode() {
         try {
-            MediaExtractor extractor = new MediaExtractor();
-            ParcelFileDescriptor pfd = null;
-            try {
-                pfd = getContentResolver().openFileDescriptor(inputUri, "r");
-            } catch (FileNotFoundException e) {
-                throw new RuntimeException(e);
-            }
-            try {
-                assert pfd != null;
-                extractor.setDataSource(pfd.getFileDescriptor());
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
-
-            int trackIndex = selectTrack(extractor); // Hàm phụ ở dưới
-            if (trackIndex < 0) return;
-
-            extractor.selectTrack(trackIndex);
-            MediaFormat format = extractor.getTrackFormat(trackIndex);
-            String mime = format.getString(MediaFormat.KEY_MIME);
-            int sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE);
-            int channelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
-            init(sampleRate, channelCount);
-
+            MediaExtractor extractorFG = createMediaExtractor(inputFGUri);
+            mediaFormatFG = extractorFG.getTrackFormat(trackIndex);
+            String mime = mediaFormatFG.getString(MediaFormat.KEY_MIME);
             assert mime != null;
             MediaCodec codec = MediaCodec.createDecoderByType(mime);
-            codec.setCallback(new MediaCodec.Callback() {
-                @Override
-                public void onInputBufferAvailable(@NonNull MediaCodec codec, int index) {
-                    ByteBuffer inputBuffer = codec.getInputBuffer(index);
-                    assert inputBuffer != null;
-                    int sampleSize = extractor.readSampleData(inputBuffer, 0);
-                    if (sampleSize >= 0) {
-                        long presentationTimeUs = extractor.getSampleTime();
-                        codec.queueInputBuffer(index, 0, sampleSize, presentationTimeUs, 0);
-                        extractor.advance();
-                    } else {
-                        codec.queueInputBuffer(index, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-                    }
-                }
-
-                @Override
-                public void onOutputBufferAvailable(@NonNull MediaCodec codec, int index, @NonNull MediaCodec.BufferInfo info) {
-                    if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                        //isOutputEOS = true;
-                        Log.d(TAG, "Output EOS received");
-                        flush();
-                        codec.stop();
-                        codec.release();
-                        extractor.release();
-                        return;
-                    }
-
-                    ByteBuffer buffer = codec.getOutputBuffer(index);
-                    if(buffer != null){
-
-                        onPcmDataFromDecoder(buffer, info);
-                       // Log.i(TAG, "onOutputBufferAvailable: ");
-                    }
-
-                    // TODO: Xử lý dữ liệu giải mã tại đây (phát audio, render video, ...)
-                    codec.releaseOutputBuffer(index, false);
-                }
-
-                @Override
-                public void onError(@NonNull MediaCodec codec, @NonNull MediaCodec.CodecException e) {
-                    Log.e("Decode", "Codec error", e);
-                }
-
-                @Override
-                public void onOutputFormatChanged(@NonNull MediaCodec codec, @NonNull MediaFormat format) {
-                    Log.d("Decode", "Output format changed: " + format);
-                }
-            });
-
-            codec.configure(format, null, null, 0);
+            codec.setCallback(new AudioDecoder(extractorFG,true, audioDetector));
+            codec.configure(mediaFormatFG, null, null, 0);
             codec.start();
 
+            int sampleRate = mediaFormatFG.getInteger(MediaFormat.KEY_SAMPLE_RATE);
+            int channelCount = mediaFormatFG.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
+            audioDetector.init(sampleRate, channelCount);
+
+            MediaExtractor extractorBG = createMediaExtractor(inputBGUri);
+            mediaFormatBG = extractorBG.getTrackFormat(trackIndex);
+            String minebg = mediaFormatBG.getString(MediaFormat.KEY_MIME);
+            assert minebg != null;
+            MediaCodec codecBG = MediaCodec.createDecoderByType(minebg);
+            codecBG.setCallback(new AudioDecoder(extractorBG,false, audioDetector));
+            codecBG.configure(mediaFormatBG, null, null, 0);
+            codecBG.start();
         } catch (IOException e) {
             //e.printStackTrace();
         }
+    }
+
+     MediaExtractor createMediaExtractor(Uri uri) {
+         MediaExtractor extractor = new MediaExtractor();
+         ParcelFileDescriptor pfd_fg = null;
+         try {
+             pfd_fg = getContentResolver().openFileDescriptor(uri, "r");
+         } catch (FileNotFoundException e) {
+             throw new RuntimeException(e);
+         }
+         try {
+             assert pfd_fg != null;
+             extractor.setDataSource(pfd_fg.getFileDescriptor());
+         } catch (IOException e) {
+             throw new RuntimeException(e);
+         }
+
+         trackIndex = selectTrack(extractor); // Hàm phụ ở dưới
+         if (trackIndex < 0) return null;
+
+         extractor.selectTrack(trackIndex);
+         return extractor;
     }
 
     int selectTrack(MediaExtractor extractor) {
@@ -171,17 +123,16 @@ public class MainActivity extends AppCompatActivity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQUEST_CODE_PICK_VIDEO && resultCode == RESULT_OK) {
-            inputUri = data.getData();
-            assert inputUri != null;
-            Log.i(TAG, "onActivityResult: " + inputUri.getPath());
-            binding.sampleText.setText(inputUri.getPath());
+            inputFGUri = data.getData();
+            assert inputFGUri != null;
+            Log.i(TAG, "onActivityResult: " + inputFGUri.getPath());
+            binding.sampleText.setText(inputFGUri.getPath());
             //decodeMP4WithCallback(videoUri);
+        } else if(requestCode == REQUEST_CODE_PICK_AUDIO && resultCode == RESULT_OK) {
+            inputBGUri = data.getData();
+            assert inputBGUri != null;
+            Log.i(TAG, "onActivityResult: " + inputBGUri.getPath());
+            binding.sampleText.setText(inputBGUri.getPath());
         }
     }
-
-    /**
-     * A native method that is implemented by the 'audiodetector' native library,
-     * which is packaged with this application.
-     */
-    public native String stringFromJNI();
 }

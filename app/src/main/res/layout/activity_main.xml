@@ -20,7 +20,7 @@
         android:id="@+id/button"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginStart="96dp"
+        android:layout_marginStart="44dp"
         android:layout_marginBottom="256dp"
         android:text="@string/button"
         app:layout_constraintBottom_toBottomOf="parent"
@@ -30,12 +30,24 @@
         android:id="@+id/decode"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginEnd="72dp"
+        android:layout_marginEnd="40dp"
         android:layout_marginBottom="256dp"
         android:text="@string/decode"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintHorizontal_bias="0.909"
+        app:layout_constraintTop_toBottomOf="@+id/sample_text"
+        app:layout_constraintVertical_bias="1.0" />
+
+    <Button
+        android:id="@+id/bg"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="16dp"
+        android:layout_marginBottom="256dp"
+        android:text="@string/bg"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toStartOf="@+id/decode"
+        app:layout_constraintHorizontal_bias="0.702"
         app:layout_constraintStart_toEndOf="@+id/button" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>
