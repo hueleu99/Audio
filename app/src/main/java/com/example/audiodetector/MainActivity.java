@@ -1,33 +1,29 @@
 package com.example.audiodetector;
 
 import androidx.appcompat.app.AppCompatActivity;
-
 import android.content.Intent;
-import android.media.MediaCodec;
-import android.media.MediaExtractor;
 import android.media.MediaFormat;
 import android.net.Uri;
 import android.os.Bundle;
-import android.os.ParcelFileDescriptor;
 import android.util.Log;
-
 import com.example.audiodetector.databinding.ActivityMainBinding;
-
-import java.io.FileNotFoundException;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import java.io.File;
 import java.io.IOException;
+import java.util.List;
+import java.util.Map;
 
 public class MainActivity extends AppCompatActivity {
 
+    private static final Logger log = LogManager.getLogger(MainActivity.class);
     private ActivityMainBinding binding;
     private static final int REQUEST_CODE_PICK_VIDEO = 1;
     private static final int REQUEST_CODE_PICK_AUDIO = 2;
     private static final String TAG = "hue.leu";
     private Uri inputBGUri;
     private Uri inputFGUri;
-    MediaFormat mediaFormatFG;
-    MediaFormat mediaFormatBG;
-    int trackIndex;
-    AudioDetector audioDetector;
+    AudioClassifier classifier;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -36,7 +32,12 @@ public class MainActivity extends AppCompatActivity {
         binding = ActivityMainBinding.inflate(getLayoutInflater());
         setContentView(binding.getRoot());
 
-        audioDetector = new AudioDetector();
+        try {
+            classifier = new AudioClassifier(this);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+
 
         binding.button.setOnClickListener(v -> {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -45,78 +46,27 @@ public class MainActivity extends AppCompatActivity {
             startActivityForResult(intent, REQUEST_CODE_PICK_VIDEO);
         });
 
-        binding.bg.setOnClickListener(v -> {
-            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            intent.setType("audio/*");
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            startActivityForResult(intent, REQUEST_CODE_PICK_AUDIO);
-        });
         
         binding.decode.setOnClickListener(v -> {
-            startDecode();
-        });
-    }
-
-    private void startDecode() {
-        try {
-            MediaExtractor extractorFG = createMediaExtractor(inputFGUri);
-            mediaFormatFG = extractorFG.getTrackFormat(trackIndex);
-            String mime = mediaFormatFG.getString(MediaFormat.KEY_MIME);
-            assert mime != null;
-            MediaCodec codec = MediaCodec.createDecoderByType(mime);
-            codec.setCallback(new AudioDecoder(extractorFG,true, audioDetector));
-            codec.configure(mediaFormatFG, null, null, 0);
-            codec.start();
-
-            int sampleRate = mediaFormatFG.getInteger(MediaFormat.KEY_SAMPLE_RATE);
-            int channelCount = mediaFormatFG.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
-            audioDetector.init(sampleRate, channelCount);
-
-            MediaExtractor extractorBG = createMediaExtractor(inputBGUri);
-            mediaFormatBG = extractorBG.getTrackFormat(trackIndex);
-            String minebg = mediaFormatBG.getString(MediaFormat.KEY_MIME);
-            assert minebg != null;
-            MediaCodec codecBG = MediaCodec.createDecoderByType(minebg);
-            codecBG.setCallback(new AudioDecoder(extractorBG,false, audioDetector));
-            codecBG.configure(mediaFormatBG, null, null, 0);
-            codecBG.start();
-        } catch (IOException e) {
-            //e.printStackTrace();
-        }
-    }
-
-     MediaExtractor createMediaExtractor(Uri uri) {
-         MediaExtractor extractor = new MediaExtractor();
-         ParcelFileDescriptor pfd_fg = null;
-         try {
-             pfd_fg = getContentResolver().openFileDescriptor(uri, "r");
-         } catch (FileNotFoundException e) {
-             throw new RuntimeException(e);
-         }
-         try {
-             assert pfd_fg != null;
-             extractor.setDataSource(pfd_fg.getFileDescriptor());
-         } catch (IOException e) {
-             throw new RuntimeException(e);
-         }
-
-         trackIndex = selectTrack(extractor); // Hàm phụ ở dưới
-         if (trackIndex < 0) return null;
-
-         extractor.selectTrack(trackIndex);
-         return extractor;
-    }
-
-    int selectTrack(MediaExtractor extractor) {
-        for (int i = 0; i < extractor.getTrackCount(); i++) {
-            MediaFormat format = extractor.getTrackFormat(i);
-            String mime = format.getString(MediaFormat.KEY_MIME);
-            assert mime != null;
-            if (mime.startsWith("audio/")) {
-                return i;
+            try {
+                classifier.classifyFile(inputFGUri);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
             }
-        }
-        return -1;
+        });
+
+        binding.export.setOnClickListener(v -> {
+            Map<String, List<Segment>> allResults = classifier.getAllResults();
+            File outFile = new File(this.getExternalFilesDir(null), "yamnet_results.xlsx");
+            try {
+                ExcelExporter.exportAllSegmentsToExcel(this, outFile, allResults);
+            } catch (IOException e) {
+                Log.i(TAG, "onCreate: "+ e.getMessage());
+                throw new RuntimeException(e);
+            }
+        });
+
+
     }
 
     @Override

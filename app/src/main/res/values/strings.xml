@@ -2,5 +2,5 @@
     <string name="app_name">AudioDetector</string>
     <string name="button">FG</string>
     <string name="decode">Decode</string>
-    <string name="bg">BG</string>
+    <string name="export">Export2Excel</string>
 </resources>
