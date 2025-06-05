@@ -22,8 +22,13 @@ import java.io.*;
 import java.nio.*;
 import java.nio.channels.FileChannel;
 import java.util.*;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class AudioClassifier {
+    String TAG = "hueleu";
 
     private static final int TARGET_SAMPLE_RATE = 16000;
     private static final int REQUIRED_INPUT_SIZE = 15600;
@@ -45,34 +50,40 @@ public class AudioClassifier {
     private int videoTrackIndex = -1;
 
     private MediaExtractor audioExtractor;
-    private MediaExtractor videoExtractor;
+    private MediaExtractor extractor;
 
-    private MediaCodec audioEncoder;
-    private MediaCodec videoEncoder;
     private MediaMuxer muxer;
 
-    private Surface inputSurface;
     private int muxerVideoTrackIndex = -1;
     private int muxerAudioTrackIndex = -1;
     private boolean muxerStarted = false;
-    MediaCodec videoDecoder;
+    MediaCodec videoDecoder, videoEncoder;
     private int outputTrackIndex = -1;
 
     private Surface outputSurface; // hoặc null nếu xử lý YUV
 
+    private boolean videoEncoderDone = false;
+    private boolean audioEncoderDone = false;
+
+    private MediaCodec audioDecoder, audioEncoder;
+
+    private MediaCodec decoder;
+    private MediaCodec encoder;
+    private Surface inputSurface;
+    boolean encoderStarted = false;
+
+    private int muxerTrackIndex = -1;
 
     //List<Segment> segments = new ArrayList<>();
     Segment currentSegment = null;
     Segment pendingShortSegment = null;
 
+    String OUTPUT_PATH = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS).toString() + "/output.mp4";
+
     public AudioClassifier(Context context) throws IOException {
         this.context = context;
     }
 
-
-    public Map<String, List<Segment>> getAllResults() {
-        return allResults;
-    }
 
     public void classifyFile(Uri uriPathPath) throws IOException {
         reset();
@@ -82,84 +93,31 @@ public class AudioClassifier {
         } catch (FileNotFoundException e) {
             throw new RuntimeException(e);
         }
-        try {
-            assert pfd_fg != null;
-            setupExtractors(pfd_fg.getFileDescriptor());
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
+        assert pfd_fg != null;
 
-//        //create audio decoder
-//        MediaFormat audioFormat = audioExtractor.getTrackFormat(audioTrackIndex);
-//        String mineAudio = audioFormat.getString(MediaFormat.KEY_MIME);
-//        assert mineAudio != null;
-//        MediaCodec audioDecoder = MediaCodec.createDecoderByType(mineAudio);
-//        audioDecoder.setCallback(new AudioCallback());
-//        audioDecoder.configure(audioFormat, null, null, 0);
-//        audioDecoder.start();
-//
-//        //create audio encoder
-//        int BIT_RATE = 128000;
-//        int channelCount = audioFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
-//        int sampleRate = audioFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE);
-//        int maxInputSize = channelCount*sampleRate*2;
-//        MediaFormat outputAudioFormat = MediaFormat.createAudioFormat(mineAudio, sampleRate, channelCount);
-//        outputAudioFormat.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC);
-//        outputAudioFormat.setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE);
-//        outputAudioFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, maxInputSize);
-//
-//        audioEncoder = MediaCodec.createEncoderByType(mineAudio);
-//        audioEncoder.configure(outputAudioFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-//        audioEncoder.start();
-
-        //create video decoder
-        MediaFormat videoFormat = videoExtractor.getTrackFormat(videoTrackIndex);
-        String mimeVideo = videoFormat.getString(MediaFormat.KEY_MIME);
-        assert mimeVideo != null;
-
-
-        //create video encoder
-        int frameRate = videoFormat.getInteger(MediaFormat.KEY_FRAME_RATE);
-        int width = videoFormat.getInteger(MediaFormat.KEY_WIDTH);
-        int height = videoFormat.getInteger(MediaFormat.KEY_HEIGHT);
-        int I_FRAME_INTERVAL = 10;
-        String MIME_TYPE = "video/avc";
-        MediaFormat outputVideoFormat = MediaFormat.createVideoFormat(mimeVideo, width, height);
-
-        outputVideoFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT,
-                MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible);
-        outputVideoFormat.setInteger(MediaFormat.KEY_BIT_RATE, 2_000_000);
-        outputVideoFormat.setInteger(MediaFormat.KEY_FRAME_RATE, frameRate);
-        outputVideoFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL);
-
-        videoEncoder = MediaCodec.createEncoderByType(MIME_TYPE);
-        videoEncoder.configure(outputVideoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-        inputSurface = videoEncoder.createInputSurface();
-        videoEncoder.start();
-
-        videoDecoder = MediaCodec.createDecoderByType(mimeVideo);
-        //videoDecoder.setCallback(new VideoCallback());
-        videoDecoder.configure(videoFormat, inputSurface, null, 0);
-        videoDecoder.start();
-
-        //create muxer
-        String outputPath =  Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS).toString() + "/output.mp4";
-        muxer = new MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
-        process();
-        release();
+        ParcelFileDescriptor finalPfd_fg = pfd_fg;
+        new Thread(() -> {
+            try {
+                start(finalPfd_fg.getFileDescriptor());
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }).start();
 
     }
 
-    private void setupExtractors(FileDescriptor inputPath) throws IOException {
-        videoExtractor = new MediaExtractor();
-        videoExtractor.setDataSource(inputPath);
-
-        audioExtractor = new MediaExtractor();
-        audioExtractor.setDataSource(inputPath);
-
-        for (int i = 0; i < videoExtractor.getTrackCount(); i++) {
-            MediaFormat format = videoExtractor.getTrackFormat(i);
+    public void start(FileDescriptor INPUT_PATH) throws IOException {
+        Log.i(TAG, "start: videoTrackIndex " + videoTrackIndex + " audioTrackIndex " + audioTrackIndex);
+        extractor = new MediaExtractor();
+        extractor.setDataSource(INPUT_PATH);
+        Log.i(TAG, "after setDataSource: ");
+        // Select tracks
+        for (int i = 0; i < extractor.getTrackCount(); i++) {
+            MediaFormat format = extractor.getTrackFormat(i);
             String mime = format.getString(MediaFormat.KEY_MIME);
+            Log.i(TAG, "start:  after getFormat");
+
+            assert mime != null;
             if (mime.startsWith("video/") && videoTrackIndex == -1) {
                 videoTrackIndex = i;
             } else if (mime.startsWith("audio/") && audioTrackIndex == -1) {
@@ -167,232 +125,544 @@ public class AudioClassifier {
             }
         }
 
-        if (videoTrackIndex == -1) throw new RuntimeException("No video track found");
+        Log.i(TAG, "start: videoTrackIndex " + videoTrackIndex + " audioTrackIndex " + audioTrackIndex);
 
-        videoExtractor.selectTrack(videoTrackIndex);
-        if (audioTrackIndex >= 0) audioExtractor.selectTrack(audioTrackIndex);
+        if (videoTrackIndex != -1) {
+            Log.i(TAG, "start: ");
+            setupVideoPipeline();
+        }
+
+        if (audioTrackIndex != -1) {
+            setupAudioPipeline();
+        }
+        muxer = new MediaMuxer(OUTPUT_PATH, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
     }
 
-    private void process() {
-        MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
-        boolean isExtractorEOS = false;
-        boolean isDecoderEOS = false;
-        boolean isEncoderEOS = false;
-        boolean signaledEndOfStream = false;
+    private void setupVideoPipeline() throws IOException {
+        extractor.selectTrack(videoTrackIndex);
+        MediaFormat videoFormat = extractor.getTrackFormat(videoTrackIndex);
+        Log.i(TAG, "setupVideoPipeline: ");
 
-        long lastRenderTimeUs = -2_000_000; // Đảm bảo frame đầu được render
-        long dropIntervalUs = 2_000_000;    // Drop frame nếu cách frame trước < 2s
+        videoDecoder = MediaCodec.createDecoderByType(videoFormat.getString(MediaFormat.KEY_MIME));
+        videoDecoder.setCallback(new MediaCodec.Callback() {
+            @Override
+            public void onInputBufferAvailable(MediaCodec codec, int index) {
+                ByteBuffer inputBuffer = codec.getInputBuffer(index);
+                if (inputBuffer == null) return;
 
-        while (!isEncoderEOS) {
-            // 1. Feed decoder
-            if (!isExtractorEOS) {
-                int inputIndex = videoDecoder.dequeueInputBuffer(10_000);
-                if (inputIndex >= 0) {
-                    ByteBuffer inputBuffer = videoDecoder.getInputBuffer(inputIndex);
-                    int sampleSize = videoExtractor.readSampleData(inputBuffer, 0);
-                    if (sampleSize < 0) {
-                        videoDecoder.queueInputBuffer(inputIndex, 0, 0, 0,
-                                MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-                        isExtractorEOS = true;
+                int sampleSize = extractor.readSampleData(inputBuffer, 0);
+                long presentationTimeUs = extractor.getSampleTime();
+
+                if (sampleSize >= 0) {
+                    Log.i(TAG, "onInputBufferAvailable: decoder");
+                    codec.queueInputBuffer(index, 0, sampleSize, presentationTimeUs, extractor.getSampleFlags());
+                    extractor.advance();
+                } else {
+                    Log.i(TAG, "onInputBufferAvailable: decoder end");
+                    codec.queueInputBuffer(index, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                }
+            }
+
+            @Override
+            public void onOutputBufferAvailable(MediaCodec codec, int index, MediaCodec.BufferInfo info) {
+                boolean isEndOfStream = (info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
+
+                codec.releaseOutputBuffer(index, true); // render to inputSurface of encoder
+
+                if (isEndOfStream) {
+                    if (encoderStarted) {
+                        Log.d(TAG, "Decoder reached end of stream");
+                        videoEncoder.signalEndOfInputStream(); // ✅ Rất quan trọng
                     } else {
-                        long sampleTime = videoExtractor.getSampleTime();
-                        videoDecoder.queueInputBuffer(inputIndex, 0, sampleSize, sampleTime, 0);
-                        videoExtractor.advance();
+                        Log.w(TAG, "Encoder chưa start nhưng cố gọi signalEndOfInputStream!");
+                    }
+
+                }
+            }
+
+            @Override
+            public void onError(MediaCodec codec, MediaCodec.CodecException e) {
+            }
+
+            @Override
+            public void onOutputFormatChanged(MediaCodec codec, MediaFormat format) {
+            }
+        });
+
+        setupVideoEncoder(videoFormat);
+
+        videoDecoder.configure(videoFormat, inputSurface, null, 0);
+        videoDecoder.start();
+    }
+
+    private void setupVideoEncoder(MediaFormat inputFormat) throws IOException {
+        MediaFormat format = MediaFormat.createVideoFormat("video/avc",
+                inputFormat.getInteger(MediaFormat.KEY_WIDTH),
+                inputFormat.getInteger(MediaFormat.KEY_HEIGHT));
+        format.setInteger(MediaFormat.KEY_BIT_RATE, 2000000);
+        format.setInteger(MediaFormat.KEY_FRAME_RATE, 30);
+        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
+        format.setInteger(MediaFormat.KEY_COLOR_FORMAT,
+                MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
+
+        videoEncoder = MediaCodec.createEncoderByType("video/avc");
+        videoEncoder.setCallback(new MediaCodec.Callback() {
+            @Override
+            public void onOutputBufferAvailable(MediaCodec codec, int index, MediaCodec.BufferInfo info) {
+
+                ByteBuffer buffer = codec.getOutputBuffer(index);
+                if ((info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                    codec.releaseOutputBuffer(index, false);
+                    return;
+                }
+                synchronized (muxerLock) {
+                    if (info.size > 0) {
+                        buffer.position(info.offset);
+                        buffer.limit(info.offset + info.size);
+                        muxer.writeSampleData(muxerVideoTrackIndex, buffer, info);
+                    }
+                }
+
+                if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                    Log.d(TAG, "Video encode complete");
+                    videoEOS.set(true);
+                    checkAndRelease();
+                }
+                codec.releaseOutputBuffer(index, false);
+            }
+
+            @Override
+            public void onOutputFormatChanged(MediaCodec codec, MediaFormat format) {
+                synchronized (muxerLock) {
+                    if (!isMuxerStarted) {
+                        videoTrackIndex = muxer.addTrack(format);
+                        startMuxerIfReady();
                     }
                 }
             }
 
-            // 2. Drain decoder
-            boolean decoderOutputAvailable = true;
-            while (decoderOutputAvailable) {
-                int outputIndex = videoDecoder.dequeueOutputBuffer(bufferInfo, 10_000);
-                if (outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                    decoderOutputAvailable = false;
-                } else if (outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    // Bỏ qua, không cần xử lý
-                } else if (outputIndex >= 0) {
-                    long presentationTimeUs = bufferInfo.presentationTimeUs;
+            @Override
+            public void onInputBufferAvailable(MediaCodec codec, int index) {
+            }
 
-                    // Quyết định có nên render frame hay drop
-                    boolean shouldRender = (presentationTimeUs - lastRenderTimeUs >= dropIntervalUs);
-                    if (shouldRender) {
-                        videoDecoder.releaseOutputBuffer(outputIndex, true); // render
-                        lastRenderTimeUs = presentationTimeUs;
-                    } else {
-                        videoDecoder.releaseOutputBuffer(outputIndex, false); // drop
-                    }
+            @Override
+            public void onError(MediaCodec codec, MediaCodec.CodecException e) {
+            }
+        });
 
-                    // Gửi EOS tới encoder nếu decoder kết thúc
-                    if ((bufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                        isDecoderEOS = true;
-                        if (!signaledEndOfStream) {
-                            videoEncoder.signalEndOfInputStream();
-                            signaledEndOfStream = true;
-                        }
-                    }
+        videoEncoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+        inputSurface = videoEncoder.createInputSurface();
+        videoEncoder.start();
+        encoderStarted = true;
+    }
+
+    boolean audioDecoderEOS = false;
+    // Queue để chuyển PCM data giữa decoder và encoder
+    private BlockingQueue<PcmData> pcmQueue = new LinkedBlockingQueue<>();
+
+    private static class PcmData {
+        final ByteBuffer data;
+        final MediaCodec.BufferInfo info;
+
+        PcmData(ByteBuffer data, MediaCodec.BufferInfo info) {
+            this.data = data;
+            this.info = new MediaCodec.BufferInfo();
+            this.info.set(info.offset, info.size, info.presentationTimeUs, info.flags);
+        }
+    }
+    private AtomicBoolean audioEOS = new AtomicBoolean(false);
+    private AtomicBoolean videoEOS = new AtomicBoolean(false);
+
+    boolean isReleased = false;
+
+    private void checkAndRelease() {
+        if (audioEOS.get() && videoEOS.get()) {
+            releaseResources();
+        }
+    }
+
+    private void setupAudioPipeline() throws IOException {
+        Log.i(TAG, "setupAudioPipeline: ");
+        extractor.selectTrack(audioTrackIndex);
+        MediaFormat audioFormat = extractor.getTrackFormat(audioTrackIndex);
+
+        audioDecoder = MediaCodec.createDecoderByType(audioFormat.getString(MediaFormat.KEY_MIME));
+        audioDecoder.setCallback(new MediaCodec.Callback() {
+            @Override
+            public void onInputBufferAvailable(MediaCodec codec, int index) {
+                if (codec == null || isReleased) { // Kiểm tra biến trạng thái
+                    return;
+                }
+                if(audioDecoderEOS) return;
+
+                ByteBuffer buffer = codec.getInputBuffer(index);
+                int sampleSize = extractor.readSampleData(buffer, 0);
+                if (sampleSize >= 0) {
+                    long time = extractor.getSampleTime();
+                    codec.queueInputBuffer(index, 0, sampleSize, time, extractor.getSampleFlags());
+                    extractor.advance();
+                } else {
+                    codec.queueInputBuffer(index, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                    audioDecoderEOS = true;
                 }
             }
 
-            // 3. Drain encoder
-            boolean encoderOutputAvailable = true;
-            while (encoderOutputAvailable) {
-                int outputIndex = videoEncoder.dequeueOutputBuffer(bufferInfo, 10_000);
-                if (outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                    encoderOutputAvailable = false;
-                } else if (outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    if (muxerStarted) {
-                        Log.w("hueleu", "Format changed again, ignoring.");
-                        continue;
+            @Override
+            public void onOutputBufferAvailable(MediaCodec codec, int index, MediaCodec.BufferInfo info) {
+                if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                    // Gửi EOS tới encoder
+                    Log.i(TAG, "Gửi EOS tới encoder: ");
+                    pcmQueue.offer(new PcmData(null, info));
+                }
+
+                if (info.size > 0) {
+                    ByteBuffer outputBuffer = audioDecoder.getOutputBuffer(index);
+                    // Sao chép dữ liệu PCM để chuyển sang encoder
+                    ByteBuffer pcmCopy = ByteBuffer.allocateDirect(info.size);
+                    pcmCopy.put(outputBuffer);
+                    pcmCopy.flip();
+                    Log.i(TAG, " pcmQueue.offer: ");
+
+                    pcmQueue.offer(new PcmData(pcmCopy, info));
+                }
+
+                audioDecoder.releaseOutputBuffer(index, false);
+            }
+
+            @Override public void onError(MediaCodec codec, MediaCodec.CodecException e) {}
+            @Override public void onOutputFormatChanged(MediaCodec codec, MediaFormat format) {}
+        });
+
+        audioDecoder.configure(audioFormat, null, null, 0);
+        audioDecoder.start();
+
+        setupAudioEncoder(audioFormat);
+    }
+
+    private void startMuxerIfReady() {
+        if (videoTrackIndex != -1 && audioTrackIndex != -1) {
+            muxer.start();
+            isMuxerStarted = true;
+        }
+    }
+    boolean audioDecoderStared = false;
+    boolean encoderEOS = false;
+    private final Object muxerLock = new Object();
+    boolean isMuxerStarted = false;
+
+    private void setupAudioEncoder(MediaFormat inputFormat) throws IOException {
+
+        Log.i(TAG, "setupAudioEncoder: ");
+
+        MediaFormat format = MediaFormat.createAudioFormat("audio/mp4a-latm",
+                inputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE),
+                inputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT));
+        format.setInteger(MediaFormat.KEY_BIT_RATE, 128000);
+        format.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC);
+
+        audioEncoder = MediaCodec.createEncoderByType("audio/mp4a-latm");
+        audioEncoder.setCallback(new MediaCodec.Callback() {
+            @Override
+            public void onOutputBufferAvailable(MediaCodec codec, int index, MediaCodec.BufferInfo info) {
+                ByteBuffer outputBuffer = audioEncoder.getOutputBuffer(index);
+
+                if (info.size > 0) {
+                    synchronized (muxerLock) {
+                        if (!isMuxerStarted) return; // Chờ format
+
+                        outputBuffer.position(info.offset);
+                        outputBuffer.limit(info.offset + info.size);
+                        muxer.writeSampleData(outputTrackIndex, outputBuffer, info);
                     }
-                    MediaFormat newFormat = videoEncoder.getOutputFormat();
-                    outputTrackIndex = muxer.addTrack(newFormat);
+                }
+
+                audioEncoder.releaseOutputBuffer(index, false);
+
+                if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                    releaseResources(); // Kết thúc quá trình
+                    Log.i(TAG, "releaseResources: ");
+                }
+            }
+
+            @Override
+            public void onOutputFormatChanged(MediaCodec codec, MediaFormat format) {
+                synchronized (muxerLock) {
+                    audioTrackIndex = muxer.addTrack(format);
+                    startMuxerIfReady();
+                }
+            }
+
+            @Override
+            public void onInputBufferAvailable(MediaCodec codec, int index) {
+                if (encoderEOS) return;
+
+                try {
+                    PcmData pcmData = pcmQueue.poll(100, TimeUnit.MILLISECONDS);
+
+                    if (pcmData == null) {
+                        Log.i(TAG, " Chưa có dữ liệu: ");
+                        return; // Chưa có dữ liệu
+
+                    }
+
+                    MediaCodec.BufferInfo info = pcmData.info;
+                    ByteBuffer inputBuffer = audioEncoder.getInputBuffer(index);
+
+                    if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                        audioEncoder.queueInputBuffer(
+                                index, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                        );
+                        audioEOS.set(true);
+                        checkAndRelease();
+                    } else {
+                        Log.i(TAG, "encode pcm data input: ");
+                        inputBuffer.clear();
+                        inputBuffer.put(pcmData.data);
+                        audioEncoder.queueInputBuffer(
+                                index, 0, info.size, info.presentationTimeUs, 0
+                        );
+                    }
+                } catch (InterruptedException e) {
+                    Log.i(TAG, "onInputBufferAvailable: Thread.currentThread().interrupt()");
+                    Thread.currentThread().interrupt();
+                }
+            }
+
+            @Override
+            public void onError(MediaCodec codec, MediaCodec.CodecException e) {
+            }
+        });
+
+        audioEncoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+        audioEncoder.start();
+
+
+        Log.i(TAG, "setupAudioEncoder: started");
+    }
+    private void releaseResources() {
+        audioDecoder.stop();
+        audioDecoder.release();
+        audioEncoder.stop();
+        audioEncoder.release();
+        extractor.release();
+
+        synchronized (muxerLock) {
+            if (isMuxerStarted) {
+                muxer.stop();
+                muxer.release();
+            }
+        }
+    }
+
+    private void initMuxer() {
+        try {
+            File file = new File(OUTPUT_PATH);
+            if (file.exists()) file.delete();
+            muxer = new MediaMuxer(OUTPUT_PATH, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+        } catch (IOException e) {
+            throw new RuntimeException("Muxer init failed", e);
+        }
+    }
+
+    private void tryStartMuxer() {
+        if (muxer != null && muxerVideoTrackIndex != -1 && muxerAudioTrackIndex != -1) {
+            muxer.start();
+            muxerStarted = true;
+            Log.d(TAG, "Muxer started");
+        }
+    }
+
+    private void tryStopMuxer() {
+        if (videoEncoderDone && audioEncoderDone && muxer != null) {
+            try {
+                muxer.stop();
+                muxer.release();
+                Log.d(TAG, "Muxer stopped and released");
+            } catch (Exception e) {
+                Log.e(TAG, "Error stopping muxer", e);
+            }
+        }
+    }
+
+
+/*    public void startTranscoding(FileDescriptor INPUT_PATH) throws IOException {
+        Log.i(TAG, "startTranscoding: ");
+        extractor = new MediaExtractor();
+        extractor.setDataSource(INPUT_PATH);
+
+        // Tìm video track
+        for (int i = 0; i < extractor.getTrackCount(); i++) {
+            MediaFormat format = extractor.getTrackFormat(i);
+            String mime = format.getString(MediaFormat.KEY_MIME);
+            if (mime != null && mime.startsWith("video/")) {
+                videoTrackIndex = i;
+                extractor.selectTrack(videoTrackIndex);
+                setupEncoder(format);         // 🟢 Gọi trước để tạo encoder + inputSurface
+                setupDecoder(format);         // 🟢 Giờ đã có surface để cấu hình decoder
+                break;
+            }
+        }
+
+        if (videoTrackIndex == -1) {
+            throw new RuntimeException("Không tìm thấy track video!");
+        }
+    }*/
+
+/*    private void setupDecoder(MediaFormat format) throws IOException {
+        Log.i(TAG, "setupDecoder: ");
+        String mime = format.getString(MediaFormat.KEY_MIME);
+        decoder = MediaCodec.createDecoderByType(mime);
+
+        decoder.setCallback(new MediaCodec.Callback() {
+            @Override
+            public void onInputBufferAvailable(MediaCodec codec, int index) {
+                ByteBuffer inputBuffer = codec.getInputBuffer(index);
+                if (inputBuffer == null) return;
+
+                int sampleSize = extractor.readSampleData(inputBuffer, 0);
+                long presentationTimeUs = extractor.getSampleTime();
+
+                if (sampleSize >= 0) {
+                    Log.i(TAG, "onInputBufferAvailable: decoder");
+                    codec.queueInputBuffer(index, 0, sampleSize, presentationTimeUs, extractor.getSampleFlags());
+                    extractor.advance();
+                } else {
+                    Log.i(TAG, "onInputBufferAvailable: decoder end");
+                    codec.queueInputBuffer(index, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                }
+            }
+
+            @Override
+            public void onOutputBufferAvailable(MediaCodec codec, int index, MediaCodec.BufferInfo info) {
+                boolean isEndOfStream = (info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
+
+                codec.releaseOutputBuffer(index, true); // render to inputSurface of encoder
+
+                if (isEndOfStream) {
+                    if(encoderStarted){
+                        Log.d(TAG, "Decoder reached end of stream");
+                        encoder.signalEndOfInputStream(); // ✅ Rất quan trọng
+                    }else {
+                        Log.w(TAG, "Encoder chưa start nhưng cố gọi signalEndOfInputStream!");
+                    }
+
+                }
+            }
+
+            @Override
+            public void onError(MediaCodec codec, MediaCodec.CodecException e) {
+                Log.e(TAG, "Decoder error", e);
+            }
+
+            @Override
+            public void onOutputFormatChanged(MediaCodec codec, MediaFormat format) {
+                Log.i(TAG, "onOutputFormatChanged: ");
+            }
+        });
+        decoder.configure(format, inputSurface, null, 0);  // 🔁 dùng surface đã có
+        decoder.start();
+    }*/
+
+/*    private void setupEncoder(MediaFormat inputFormat) throws IOException {
+        Log.i(TAG, "setupEncoder: ");
+        int width = inputFormat.getInteger(MediaFormat.KEY_WIDTH);
+        int height = inputFormat.getInteger(MediaFormat.KEY_HEIGHT);
+
+        MediaFormat encoderFormat = MediaFormat.createVideoFormat("video/avc", width, height);
+        encoderFormat.setInteger(MediaFormat.KEY_BIT_RATE, 2_000_000);
+        encoderFormat.setInteger(MediaFormat.KEY_FRAME_RATE, 30);
+        encoderFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
+        encoderFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT,
+                MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
+
+        encoder = MediaCodec.createEncoderByType("video/avc");
+
+        encoder.setCallback(new MediaCodec.Callback() {
+            @Override
+            public void onInputBufferAvailable(MediaCodec codec, int index) {
+                Log.i(TAG, "onInputBufferAvailable: encoder");
+                // Không dùng vì sử dụng Surface
+            }
+
+            @Override
+            public void onOutputBufferAvailable(MediaCodec codec, int index, MediaCodec.BufferInfo info) {
+                if ((info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                    Log.i(TAG, "BUFFER_FLAG_CODEC_CONFIG: ");
+                    codec.releaseOutputBuffer(index, false);
+                    return;
+                }
+
+                ByteBuffer encodedData = codec.getOutputBuffer(index);
+                if (encodedData != null && info.size > 0) {
+                    if (!muxerStarted) {
+                        throw new IllegalStateException("Muxer chưa bắt đầu!");
+                    }
+                    Log.i(TAG, "onOutputBufferAvailable: encoder");
+                    encodedData.position(info.offset);
+                    encodedData.limit(info.offset + info.size);
+                    muxer.writeSampleData(muxerTrackIndex, encodedData, info);
+                }
+
+                codec.releaseOutputBuffer(index, false);
+
+                if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                    Log.d(TAG, "Encode complete");
+                    releaseAll();
+                }
+            }
+
+            @Override
+            public void onError(MediaCodec codec, MediaCodec.CodecException e) {
+                Log.e(TAG, "Encoder error", e);
+            }
+
+            @Override
+            public void onOutputFormatChanged(MediaCodec codec, MediaFormat format) {
+                try {
+                    muxer = new MediaMuxer(OUTPUT_PATH, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+                    muxerTrackIndex = muxer.addTrack(format);
                     muxer.start();
                     muxerStarted = true;
-                } else if (outputIndex >= 0) {
-                    ByteBuffer encodedBuffer = videoEncoder.getOutputBuffer(outputIndex);
-                    if ((bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
-                        bufferInfo.size = 0; // Codec config không cần ghi
-                    }
-
-                    if (bufferInfo.size > 0 && muxerStarted) {
-                        encodedBuffer.position(bufferInfo.offset);
-                        encodedBuffer.limit(bufferInfo.offset + bufferInfo.size);
-                        muxer.writeSampleData(outputTrackIndex, encodedBuffer, bufferInfo);
-                    }
-
-                    videoEncoder.releaseOutputBuffer(outputIndex, false);
-
-                    if ((bufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                        isEncoderEOS = true;
-                        break;
-                    }
+                    Log.d(TAG, "Muxer started");
+                } catch (IOException e) {
+                    throw new RuntimeException("Lỗi khi khởi tạo muxer", e);
                 }
             }
-        }
-    }
-
-
-    private void release() {
-        Log.i("hueleu", "release: ");
-        if (videoExtractor != null) videoExtractor.release();
-        if (videoDecoder != null) videoDecoder.stop();
-        if (videoDecoder != null) videoDecoder.release();
-        if (videoEncoder != null) videoEncoder.stop();
-        if (videoEncoder != null) videoEncoder.release();
-        if (muxer != null) muxer.stop();
-        if (muxer != null) muxer.release();
-    }
+        });
+        encoder.configure(encoderFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+        inputSurface = encoder.createInputSurface();
+        encoder.start();
+        encoderStarted = true;
 
 
 
-    private String mapLabelToGroup(String label) {
-        String lower = label.toLowerCase();
-        if (lower.contains("music") || lower.contains("instrument") || lower.contains("guitar") ||
-                lower.contains("violin") || lower.contains("piano") || lower.contains("drum") || lower.contains("timpani")) {
-            return "Music";
-        } else if (lower.contains("speech") || lower.contains("talking") || lower.contains("conversation")) {
-            return "Speech";
-        } else if (lower.contains("nature") || lower.contains("wind") || lower.contains("rain") ||
-                lower.contains("water") || lower.contains("bird") || lower.contains("animal")) {
-            return "Nature";
-        } else {
-            return label;  // giữ nguyên nếu không thuộc nhóm nào
-        }
-    }
+    }*/
 
-    private void processPCMData(byte[] pcmBytes, MediaFormat format) {
-        int sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE);
-        int channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
-        int numSamples = pcmBytes.length / 2;
-
-        float[] monoFloat = new float[numSamples / channels];
-
-        ByteBuffer buffer16 = ByteBuffer.wrap(pcmBytes).order(ByteOrder.LITTLE_ENDIAN);
-        for (int i = 0, j = 0; i < numSamples; i += channels, j++) {
-            short sample = buffer16.getShort(i * 2); // Chỉ lấy kênh 0
-            monoFloat[j] = sample / 32768f;
-        }
-
-        float[] resampled = resampleIfNeeded(monoFloat, sampleRate);
-        feedToYamnet(resampled);
-    }
-
-    private float[] resampleIfNeeded(float[] input, int originalRate) {
-        if (originalRate == TARGET_SAMPLE_RATE) return input;
-
-        int newLength = (int) ((long) input.length * TARGET_SAMPLE_RATE / originalRate);
-        float[] output = new float[newLength];
-
-        for (int i = 0; i < newLength; i++) {
-            float pos = ((float) i * originalRate) / TARGET_SAMPLE_RATE;
-            int idx = (int) pos;
-            float frac = pos - idx;
-
-            if (idx + 1 < input.length)
-                output[i] = input[idx] * (1 - frac) + input[idx + 1] * frac;
-            else
-                output[i] = input[idx];
-        }
-        return output;
-    }
-
-    private void feedToYamnet(float[] samples) {
-        for (float f : samples) buffer.add(f);
-
-        while (buffer.size() >= REQUIRED_INPUT_SIZE) {
-            float[] input = new float[REQUIRED_INPUT_SIZE];
-            for (int i = 0; i < REQUIRED_INPUT_SIZE; i++) {
-                input[i] = buffer.get(i);
+    private void releaseAll() {
+        try {
+            if (decoder != null) {
+                decoder.stop();
+                decoder.release();
             }
-
-
-            // Slide 0.48s
-            buffer.subList(0, STEP_SIZE).clear();
-        }
-    }
-
-
-    private void handleLabelChange(String newLabel) {
-        float time = currentTime;
-
-        if (currentSegment == null) {
-            currentSegment = new Segment(newLabel, time, time + frameDurationSec, lastConfidence);
-            return;
-        }
-
-        if (newLabel.equals(currentSegment.label)) {
-            // Tiếp tục cùng nhãn → mở rộng segment
-            currentSegment.endTimeSec = time + frameDurationSec;
-
-            // Nếu có nhãn ngắn xen giữa trước đó cùng nhãn này → gộp luôn
-            if (pendingShortSegment != null) {
-                currentSegment.endTimeSec = pendingShortSegment.endTimeSec;
-                pendingShortSegment = null;
+            if (encoder != null) {
+                encoder.stop();
+                encoder.release();
             }
-        } else {
-            float segmentDuration = currentSegment.endTimeSec - currentSegment.startTimeSec;
-
-            if (segmentDuration >= 1.0f) {
-                segments.add(currentSegment);
+            if (extractor != null) {
+                extractor.release();
             }
-
-            // Nếu nhãn mới khác → tạm giữ lại nếu ngắn
-            if (segmentDuration < 1.0f) {
-                // Bỏ qua nhãn ngắn nếu không có gì phía sau để gộp
-                pendingShortSegment = currentSegment;
+            if (muxer != null) {
+                try {
+                    muxer.stop();
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+                muxer.release();
             }
-
-            currentSegment = new Segment(newLabel, time, time + frameDurationSec, lastConfidence);
+            Log.d(TAG, "Đã giải phóng toàn bộ");
+        } catch (Exception e) {
+            e.printStackTrace();
         }
-    }
-
-
-    private int argMax(float[] arr) {
-        int maxIdx = 0;
-        for (int i = 1; i < arr.length; i++) {
-            if (arr[i] > arr[maxIdx]) maxIdx = i;
-        }
-        return maxIdx;
     }
 
     private void reset() {

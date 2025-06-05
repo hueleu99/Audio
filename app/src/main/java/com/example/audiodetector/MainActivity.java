@@ -5,7 +5,11 @@ import android.content.Intent;
 import android.media.MediaFormat;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Environment;
 import android.util.Log;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
+
 import com.example.audiodetector.databinding.ActivityMainBinding;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -15,74 +19,70 @@ import java.util.List;
 import java.util.Map;
 
 public class MainActivity extends AppCompatActivity {
-
-    private static final Logger log = LogManager.getLogger(MainActivity.class);
-    private ActivityMainBinding binding;
-    private static final int REQUEST_CODE_PICK_VIDEO = 1;
-    private static final int REQUEST_CODE_PICK_AUDIO = 2;
-    private static final String TAG = "hue.leu";
-    private Uri inputBGUri;
-    private Uri inputFGUri;
-    AudioClassifier classifier;
+    private SurfaceView surfaceView;
+    private AudioVideoTranscoder transcoder;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
 
-        binding = ActivityMainBinding.inflate(getLayoutInflater());
-        setContentView(binding.getRoot());
+        // 1. Khởi tạo SurfaceView
+        surfaceView = findViewById(R.id.surface_view);
 
+        // 2. Đảm bảo Surface đã sẵn sàng
+        surfaceView.getHolder().addCallback(new SurfaceHolder.Callback() {
+            @Override
+            public void surfaceCreated(SurfaceHolder holder) {
+                // Surface đã sẵn sàng, có thể bắt đầu transcode
+                startTranscoding();
+            }
+
+            @Override
+            public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+                // Xử lý thay đổi kích thước (nếu cần)
+            }
+
+            @Override
+            public void surfaceDestroyed(SurfaceHolder holder) {
+                // Dừng transcode khi Surface bị hủy
+                if (transcoder != null) {
+                    transcoder.stopTranscoding();
+                }
+            }
+        });
+    }
+
+    private void startTranscoding() {
+        transcoder = new AudioVideoTranscoder();
         try {
-            classifier = new AudioClassifier(this);
+            transcoder.startTranscoding(
+                    this,
+                    getInputFilePath(),
+                    getOutputFilePath(),
+                    surfaceView // Truyền SurfaceView vào
+            );
         } catch (IOException e) {
-            throw new RuntimeException(e);
+            e.printStackTrace();
         }
+    }
 
+    private String getInputFilePath() {
+        // Lấy đường dẫn file input (ví dụ từ assets hoặc storage)
+        return Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS).toString() + "/#000.mp4";
+    }
 
-        binding.button.setOnClickListener(v -> {
-            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            intent.setType("video/*");
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            startActivityForResult(intent, REQUEST_CODE_PICK_VIDEO);
-        });
-
-        
-        binding.decode.setOnClickListener(v -> {
-            try {
-                classifier.classifyFile(inputFGUri);
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
-        });
-
-        binding.export.setOnClickListener(v -> {
-            Map<String, List<Segment>> allResults = classifier.getAllResults();
-            File outFile = new File(this.getExternalFilesDir(null), "yamnet_results.xlsx");
-            try {
-                ExcelExporter.exportAllSegmentsToExcel(this, outFile, allResults);
-            } catch (IOException e) {
-                Log.i(TAG, "onCreate: "+ e.getMessage());
-                throw new RuntimeException(e);
-            }
-        });
-
-
+    private String getOutputFilePath() {
+        // Tạo file output
+        File outputDir = getExternalFilesDir(null);
+        return new File(outputDir, "output.mp4").getAbsolutePath();
     }
 
     @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQUEST_CODE_PICK_VIDEO && resultCode == RESULT_OK) {
-            inputFGUri = data.getData();
-            assert inputFGUri != null;
-            Log.i(TAG, "onActivityResult: " + inputFGUri.getPath());
-            binding.sampleText.setText(inputFGUri.getPath());
-            //decodeMP4WithCallback(videoUri);
-        } else if(requestCode == REQUEST_CODE_PICK_AUDIO && resultCode == RESULT_OK) {
-            inputBGUri = data.getData();
-            assert inputBGUri != null;
-            Log.i(TAG, "onActivityResult: " + inputBGUri.getPath());
-            binding.sampleText.setText(inputBGUri.getPath());
+    protected void onDestroy() {
+        super.onDestroy();
+        if (transcoder != null) {
+            transcoder.stopTranscoding();
         }
     }
 }
